@@ -1,0 +1,18 @@
+# ranges.txt example - one START-END per line, hex without 0x.
+#
+# Start is inclusive, end exclusive, and both must be 8-byte aligned: the
+# payload copies qwords. Keep each range short enough that the serial link can
+# finish before the PXE timeout fires - at 115200 baud you get roughly 11.5 KB/s
+# of wire time, and every byte costs 8 (8 bytes in, 1 byte out) so budget about
+# 1.4 KB of memory per second on a 115200 line.
+#
+# These are DXE-phase addresses. On OVMF, EfiBootServicesData and the DXE core's
+# own pool tend to land in the low 0x7xxxxxxx range; on real hardware it moves
+# every boot unless the firmware is deterministic. Take the numbers from the
+# same serial log that gave you the pool base, not from these placeholders.
+
+# OVMF DXE core pool, first page
+0x7E000000-0x7E001000
+
+# the PxeBc private data, so the run can be compared against the pool dump
+0x7E100000-0x7E100800

@@ -1,0 +1,31 @@
+# Windows build for the simulator only.
+#
+# This is GNU make syntax, so run it with make, not nmake:
+#
+#   make -f Makefile.win
+#   build\sim.exe
+#
+# The simulator links the same craft.c / graft.c / layout.c the Linux
+# transmitter uses, so a passing run means the offsets, the packet layout and
+# the payload's ABI are consistent. It says nothing about a specific firmware's
+# pool address, which is what tools/fw_offsets.py is for.
+
+CL      ?= cl
+CFLAGS  ?= /nologo /W3 /O2 /Iinclude
+OUT     := build
+
+all: $(OUT)\sim.exe
+
+$(OUT):
+	@if not exist $(OUT) mkdir $(OUT)
+
+$(OUT)\sim.exe: sim\sim.c src\craft.c src\graft.c src\layout.c | $(OUT)
+	$(CL) $(CFLAGS) /Fe:$(OUT)\sim.exe sim\sim.c src\craft.c src\graft.c src\layout.c
+
+payload:
+	@echo "payload.bin must be built on the Linux side (as/ld/objcopy)"
+
+clean:
+	@if exist $(OUT) rmdir /s /q $(OUT)
+
+.PHONY: all clean payload

