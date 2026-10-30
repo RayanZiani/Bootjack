@@ -1,0 +1,10 @@
+# This project is built on Linux (as/ld/objcopy, gcc) and on Windows (MSVC for
+# the simulator only). Pin source to LF so the Makefile and the assembler see
+# the same bytes on both, regardless of core.autocrlf.
+* text=auto eol=lf
+
+*.bin binary
+*.exe binary
+*.obj binary
+*.o   binary
+*.elf binary

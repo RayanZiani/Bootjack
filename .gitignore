@@ -1,0 +1,18 @@
+# build artifacts
+build/
+*.o
+*.obj
+*.elf
+*.exe
+*.pdb
+*.ilk
+*.map
+
+# python
+__pycache__/
+*.pyc
+
+# editors / VS
+.vs/
+*.user
+*.suo
