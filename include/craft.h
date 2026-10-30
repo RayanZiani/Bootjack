@@ -28,6 +28,9 @@ typedef struct {
 
 size_t craft_icmp4(uint8_t *out, size_t cap, const craft_req_t *rq);
 size_t craft_icmp6(uint8_t *out, size_t cap, const craft_req_t *rq);
+/* Full IPv6 datagram: 40-byte header + the ICMPv6 message from craft_icmp6,
+ * because IPV6_HDRINCL wants the header too. */
+size_t craft_ipv6_packet(uint8_t *out, size_t cap, const craft_req_t *rq);
 void   craft_seed(uint32_t s);
 
 #endif

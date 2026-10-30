@@ -54,8 +54,8 @@ size_t craft_icmp4(uint8_t *out, size_t cap, const craft_req_t *rq)
   /* Embedded original datagram: this is what the receive path validates. */
   eip = (ip4_hdr_t *)(msg + PXE_ICMP_HDR_SIZE);
   eip->ver_ihl  = 0x45;
-  eip->tot_len  = htons((uint16_t)(PXE_EMBED_IP_HDR + PXE_EMBED_UDP_HDR + 8));
-  eip->id       = htons((uint16_t)xrand());
+  eip->tot_len  = pxe_htons((uint16_t)(PXE_EMBED_IP_HDR + PXE_EMBED_UDP_HDR + 8));
+  eip->id       = pxe_htons((uint16_t)xrand());
   eip->ttl      = 64;
   eip->proto    = 17;            /* UDP */
   eip->saddr    = rq->embed_src;
@@ -63,9 +63,9 @@ size_t craft_icmp4(uint8_t *out, size_t cap, const craft_req_t *rq)
   eip->checksum = csum_be(eip, sizeof(*eip), 0);
 
   eudp = (udp_hdr_t *)(msg + PXE_ICMP_HDR_SIZE + PXE_EMBED_IP_HDR);
-  eudp->sport = htons(rq->embed_sport);
-  eudp->dport = htons(rq->embed_dport);
-  eudp->len   = htons((uint16_t)(PXE_EMBED_UDP_HDR + 8));
+  eudp->sport = pxe_htons(rq->embed_sport);
+  eudp->dport = pxe_htons(rq->embed_dport);
+  eudp->len   = pxe_htons((uint16_t)(PXE_EMBED_UDP_HDR + 8));
 
   memcpy(msg + PXE_GRAFT_START, rq->embed_data, 8);
 
@@ -81,8 +81,8 @@ size_t craft_icmp4(uint8_t *out, size_t cap, const craft_req_t *rq)
 
   oip = (ip4_hdr_t *)out;
   oip->ver_ihl  = 0x45;
-  oip->tot_len  = htons((uint16_t)total);
-  oip->id       = htons((uint16_t)xrand());
+  oip->tot_len  = pxe_htons((uint16_t)total);
+  oip->id       = pxe_htons((uint16_t)xrand());
   oip->ttl      = 64;
   oip->proto    = 1;             /* ICMP */
   oip->saddr    = rq->src;
@@ -114,14 +114,14 @@ size_t craft_icmp6(uint8_t *out, size_t cap, const craft_req_t *rq)
     /* v6 client, v4 PXE server: the embedded datagram keeps its v4 header. */
     eip = (ip4_hdr_t *)(out + PXE_ICMP_HDR_SIZE);
     eip->ver_ihl = 0x45;
-    eip->tot_len = htons((uint16_t)(PXE_EMBED_IP_HDR + PXE_EMBED_UDP_HDR + 8));
+    eip->tot_len = pxe_htons((uint16_t)(PXE_EMBED_IP_HDR + PXE_EMBED_UDP_HDR + 8));
     eip->ttl = 64; eip->proto = 17;
     eip->saddr = rq->embed_src; eip->daddr = rq->embed_dst;
     eip->checksum = csum_be(eip, sizeof(*eip), 0);
     eudp = (udp_hdr_t *)(out + PXE_ICMP_HDR_SIZE + PXE_EMBED_IP_HDR);
-    eudp->sport = htons(rq->embed_sport);
-    eudp->dport = htons(rq->embed_dport);
-    eudp->len   = htons((uint16_t)(PXE_EMBED_UDP_HDR + 8));
+    eudp->sport = pxe_htons(rq->embed_sport);
+    eudp->dport = pxe_htons(rq->embed_dport);
+    eudp->len   = pxe_htons((uint16_t)(PXE_EMBED_UDP_HDR + 8));
     memcpy(out + PXE_GRAFT_START, rq->embed_data, 8);
   }
 
@@ -132,4 +132,33 @@ size_t craft_icmp6(uint8_t *out, size_t cap, const craft_req_t *rq)
   ih->checksum = 0;
   ih->checksum = icmp6_csum(out, icmp_len, rq->src6, rq->dst6);
   return icmp_len;
+}
+
+/* ------------------------------------------------------------------------ *
+ * IPv6 datagram: the header has to be present because the sender uses
+ * IPV6_HDRINCL, and the ICMPv6 checksum covers a pseudo-header built from the
+ * addresses we are spoofing.
+ * ------------------------------------------------------------------------ */
+size_t craft_ipv6_packet(uint8_t *out, size_t cap, const craft_req_t *rq)
+{
+  size_t icmp_len;
+  ip6_hdr_t *ip6;
+
+  if (cap <= IP6_HDR_LEN)
+    return 0;
+
+  icmp_len = craft_icmp6(out + IP6_HDR_LEN, cap - IP6_HDR_LEN, rq);
+  if (!icmp_len)
+    return 0;
+
+  ip6 = (ip6_hdr_t *)out;
+  memset(ip6, 0, IP6_HDR_LEN);
+  ip6->ver_tc_flow = pxe_htonl(0x60000000u);        /* version 6 */
+  ip6->payload_len = pxe_htons((uint16_t)icmp_len);
+  ip6->next_hdr    = IPPROTO_ICMPV6_N;
+  ip6->hop_limit   = 64;
+  memcpy(ip6->src, rq->src6, 16);
+  memcpy(ip6->dst, rq->dst6, 16);
+
+  return IP6_HDR_LEN + icmp_len;
 }
